@@ -1,0 +1,1037 @@
+---
+title: "Project-Patient-Return"
+author: "thaque2050"
+date: "March 31, 2019"
+output: html_document
+---
+
+## Define caption font for the tables
+```{r results="asis"}
+cat("
+<style>
+caption {
+      color: black;
+      font-weight: 600;
+      font-size: 1.1em;
+    }
+</style>
+")
+```
+<br>
+
+## Import libraries
+```{r,warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggcorrplot)
+library(knitr)
+library(kableExtra)
+library(reshape2)
+library(caTools)
+library(xgboost)
+library(h2o)
+library(ranger)
+library(class)
+library(tree)
+library(MASS)
+```
+<br>
+
+## Exploratory analysis of combined test and train data
+<br>
+
+### View training data
+```{r,warning=FALSE}
+df<-read.csv('Hospitals_Train.csv',nrows = 38221)
+print(paste('Number of features are',ncol(df)))
+print(paste('Number of observations are',nrow(df)))
+str(df)
+```
+<br>
+
+### View testing data
+```{r,warning=FALSE}
+df2<-read.csv('Hospitals_Test_X.csv')
+print(paste('Number of features are',ncol(df2)))
+print(paste('Number of observations are',nrow(df2)))
+```
+<br>
+
+### Combine testing and training data for exploratory analysis
+```{r,warning=FALSE}
+df3=data.frame(rbind(df[,1:26],df2))
+```
+<br>
+
+### Missing values by variable
+```{r,warning=FALSE}
+df4=df3
+df4[df4=='']=NA
+df4[df4=='#N/A']=NA
+df4[df4=='#VALUE!']=NA
+
+miss_df3_abs=sapply(df4, function(x)sum(is.na(x))/nrow(df4)*100)%>%data.frame()
+m_variable=rownames(miss_df3_abs)
+miss_df3_abs=data.frame(cbind(m_variable,miss_df3_abs))
+colnames(miss_df3_abs)=c('Variable_Name','Missing_Values')
+
+miss_df3_abs%>%ggplot()+
+  geom_col(aes(x=reorder(Variable_Name,-Missing_Values),y=Missing_Values),color='blue',fill='blue')+
+  xlab('Variable Name')+ylab('Percent of Missing Values')+
+  theme(axis.text.x = element_text(angle = 90))+ylim(0,100)+ggtitle('Figure 0: Percent Missing Entries by Feature')
+```
+<br>
+
+
+### View consult_in_ed feature
+```{r,warning=FALSE}
+kable(table(df3$CONSULT_IN_ED,useNA = 'always'),caption = 'Table 1: Frequency of factors in consult_in_ed feature')%>%kable_styling(bootstrap_options = c("striped", "hover"))
+```
+<br>
+
+### View risk and severity features
+```{r,warning=FALSE}
+df3%>%group_by(SEVERITY)%>%summarise(count=n())%>%ggplot()+geom_col(aes(x = reorder(SEVERITY,-count),y=count),color='blue',fill='blue')+ylab('Number of Observations')+theme(axis.text.x = element_text(angle = 90))+ggtitle('Figure 1: Frequency of factors in severity feature')
+
+df3%>%group_by(RISK)%>%summarise(count=n())%>%ggplot()+geom_col(aes(x = reorder(RISK,-count),y=count),color='blue',fill='blue')+ylab('Number of Observations')+theme(axis.text.x = element_text(angle = 90))+ggtitle('Figure 2: Frequency of factors in risk feature')
+
+kable(df3%>%group_by(RISK,SEVERITY)%>%summarise(count=n())%>%data.frame(),caption = 'Table 2: Missing values between risk and severity')%>%kable_styling(bootstrap_options = c("striped", "hover"))
+```
+<br>
+
+### View admit_result feature
+```{r,warning=FALSE}
+df3%>%group_by(ADMIT_RESULT)%>%summarise(count=n())%>%ggplot()+
+  geom_col(aes(x = reorder(ADMIT_RESULT,-count),y = count),color='blue',fill='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 3: Frequency of factors in admit_result feature')
+
+a=df3%>%filter(ADMIT_RESULT=='')%>%group_by(ADMIT_RESULT,SAME_DAY,ED_RESULT)%>%
+  summarise(count=n())%>%data.frame()
+
+kable(a,caption = 'Table 3: Admit_result vs same_day vs ED_RESULT')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+<br>
+
+
+### View acuity_arr feature
+```{r,warning=FALSE}
+df3%>%group_by(ACUITY_ARR)%>%summarise(count=n())%>%ggplot()+
+  geom_col(aes(x = reorder(ACUITY_ARR,-count),y = count),color='blue',fill='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 4: Frequency of factors in acuity_arr feature')
+
+a=df3[df3$ACUITY_ARR=='',]%>%mutate(total=n())%>%group_by(RISK,SEVERITY,total)%>%summarise(count=n())%>%
+  mutate(proportion=paste(round(count/total*100,digits = 2),'%',sep =''))%>%data.frame()%>%
+  dplyr::select(RISK,SEVERITY,count,proportion)
+
+kable(a,caption = 'Table 4: Mapping missing entries in acuity_arr with values in risk/severity')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+<br>
+
+### View same_day feature
+```{r,warning=FALSE}
+df3%>%group_by(SAME_DAY)%>%summarise(count=n())%>%ggplot()+
+  geom_col(aes(x = reorder(SAME_DAY,-count),y = count),color='blue',fill='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 5: Frequency of factors in same_day feature')
+```
+<br>
+
+### View consult_order feature
+```{r,warning=FALSE}
+df3%>%group_by(CONSULT_ORDER)%>%summarise(count=n())%>%ggplot()+
+  geom_col(aes(x = reorder(CONSULT_ORDER,-count),y = count),color='blue',fill='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 6: Frequency of factors in consult_order feature')
+```
+<br>
+
+### View consult_charge feature
+```{r,warning=FALSE}
+df3%>%group_by(CONSULT_CHARGE)%>%summarise(count=n())%>%ggplot()+
+  geom_col(aes(x = reorder(CONSULT_CHARGE,-count),y = count),color='blue',fill='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 7: Frequency of factors in consult_charge feature')
+```
+<br>
+
+### View Weekday_arr,weekday_dep features (14)
+```{r,warning=FALSE}
+a=df3%>%group_by(WEEKDAY_ARR)%>%summarise(count=n())%>%data.frame()
+b=df3%>%group_by(WEEKDAY_DEP)%>%summarise(count2=n())%>%data.frame()
+c=data.frame(cbind(a,b[,2]))
+colnames(c)=c('Weekday','count_arr','count_dep')
+c
+
+data.m <- melt(c, id.vars='Weekday')
+data.m%>%ggplot()+geom_col(aes(x = Weekday,y = value, fill=variable),position = "dodge")+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 8: Frequency of factors in weekday_arr and weekday_dep features')
+
+a=table(df3$WEEKDAY_ARR,df3$WEEKDAY_DEP)
+
+kable(a,caption = 'Table 5b: Relation between weekday_arr and weekday_dep')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+<br>
+
+
+### View month_arr,month_dep features
+```{r,warning=FALSE}
+a=df3%>%group_by(MONTH_ARR)%>%summarise(count=n())%>%data.frame()
+colnames(a)=c('Month','MONTH_ARR_Count')
+b=df3%>%group_by(MONTH_DEP)%>%summarise(count2=n())%>%data.frame()
+colnames(b)=c('Month','MONTH_DEP_Count')
+c=full_join(a,b)
+
+data.m <- melt(c, id.vars='Month')
+data.m%>%ggplot()+geom_col(aes(x = Month,y = value, fill=variable),position = "dodge")+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 9: Frequency of factors in month_arr and month_dep features')+
+  scale_x_continuous(name="Month", breaks = seq(1,12,1))
+
+a=table(df3$MONTH_ARR,df3$MONTH_DEP)
+
+kable(a,caption = 'Table 5c: Relation between month_arr and month_dep')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+
+```
+<br>
+
+
+### View diag_details feature
+```{r,warning=FALSE}
+df3%>%group_by(DIAG_DETAILS)%>%summarise(count=n())%>%
+  ggplot()+geom_col(aes(x = DIAG_DETAILS,y = count),fill='blue',color='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 0))+
+  ggtitle('Figure 10: Frequency of observations for each value of diag_details feature')
+```
+<br>
+
+
+### View charges feature
+```{r,warning=FALSE}
+df3$CHARGES=as.numeric(as.character(df3$CHARGES))
+df3%>%ggplot()+geom_histogram(aes(x=CHARGES,y = ..density..),fill='red',color='red')+
+  ylab('Density of Observations')+
+  theme(axis.text.x = element_text(angle = 0))+
+  ggtitle('Figure 11: Density of observations for each value of charge feature')
+
+df3[is.na(df3$CHARGES),]%>%group_by(FINANCIAL_CLASS)%>%summarise(count=n())%>%ggplot()+
+  geom_col(aes(x=reorder(FINANCIAL_CLASS,-count),y=count),fill='blue',color='blue')+
+  ylab('Number of observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 12: Number of observations with missing value of charge by financial_class')
+
+df3[is.na(df3$CHARGES),]%>%group_by(ED_RESULT)%>%summarise(count=n())%>%ggplot()+
+  geom_col(aes(x=reorder(ED_RESULT,-count),y=count),fill='blue',color='blue')+
+  ylab('Number of observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 13: Number of observations with missing value of charge by ed_result')
+
+df3%>%group_by(FINANCIAL_CLASS)%>%summarise(mean_charge=mean(CHARGES,na.rm = TRUE))%>%ggplot()+
+  geom_col(aes(x=reorder(FINANCIAL_CLASS,-mean_charge),y=mean_charge),fill='blue',color='blue')+
+  ylab('Mean Value of Charge')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 14: Mean charge by financial_class')
+
+df3%>%group_by(ED_RESULT)%>%summarise(mean_charge=mean(CHARGES,na.rm = TRUE))%>%ggplot()+
+  geom_col(aes(x=reorder(ED_RESULT,-mean_charge),y=mean_charge),fill='blue',color='blue')+
+  ylab('Mean Value of Charge')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 15: Mean charge by factors in ed_result feature')
+```
+<br>
+
+### View ed_result feature
+```{r,warning=FALSE}
+df3%>%group_by(ED_RESULT)%>%summarise(count=n())%>%
+  ggplot()+geom_col(aes(x = reorder(ED_RESULT,-count),y = count),fill='blue',color='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 16: Frequency of observations for each value of ed_result feature')
+```
+<br>
+
+
+### View hour_arr and hour_dep features
+```{r,warning=FALSE}
+a=df3%>%group_by(HOUR_ARR)%>%summarise(count=n())%>%data.frame()
+colnames(a)=c('Hour','Arr_count')
+b=df3%>%group_by(HOUR_DEP)%>%summarise(count=n())%>%data.frame()
+colnames(b)=c('Hour','Dep_count')
+c=full_join(a,b)
+
+data.m <- melt(c, id.vars='Hour')
+data.m%>%ggplot()+geom_col(aes(x = Hour,y = value, fill=variable),position = "dodge")+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 0))+
+  ggtitle('Figure 17: Number of observation for each factor in hour_arr and hour_dep features')+
+  scale_x_continuous(name="Month", breaks = seq(1,24,1))
+
+a=table(df3$HOUR_ARR,df3$HOUR_DEP)
+
+kable(a,caption = 'Table 5d: Relation between hour_arr and hour_dep')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+```
+<br>
+
+
+### View age feature
+```{r,warning=FALSE}
+df3%>%ggplot()+geom_histogram(aes(x=AGE,y = ..density..),fill='blue',color='blue')+
+  ylab('Density of Observations')+
+  theme(axis.text.x = element_text(angle = 0))+
+  ggtitle('Figure 18: Density of observations for each value of age feature')
+
+a=df3%>%mutate(age_category=cut(AGE,breaks = c(0,17,40,65,99,Inf),labels = c('<=17','18_40','40_65','66_99','>=100')))%>%
+  group_by(age_category)%>%summarise(count=n())
+
+kable(a,caption = 'Table 5: Count of observations by age category')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+<br>
+
+
+### View gender feature
+```{r,warning=FALSE}
+df3%>%group_by(GENDER)%>%summarise(count=n())%>%ggplot()+
+  geom_col(aes(x=GENDER,y = count),fill='blue',color='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 0))+
+  ggtitle('Figure 19: Number of observations for each gender')
+```
+<br>
+
+
+### View hospital feature (22)
+```{r,warning=FALSE}
+df3%>%group_by(HOSPITAL)%>%summarise(count=n())%>%ggplot()+
+  geom_col(aes(x=reorder(HOSPITAL,-count),y = count),fill='blue',color='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 0))+
+  ggtitle('Figure 20: Number of observations for each hospital')
+```
+<br>
+
+
+### View race and ethnicity feature
+```{r,warning=FALSE}
+df3%>%group_by(RACE)%>%summarise(count=n())%>%ggplot()+
+  geom_col(aes(x=reorder(RACE,-count),y = count),fill='blue',color='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 21: Number of observations for each race')
+
+
+df3%>%group_by(ETHNICITY)%>%summarise(count=n())%>%
+  ggplot()+geom_col(aes(x=reorder(ETHNICITY,-count),y = count),fill='blue',color='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 0))+
+  ggtitle('Figure 22: Number of observations for each ethnicity')
+
+a=df3%>%dplyr::select(RACE,ETHNICITY)%>%group_by(RACE,ETHNICITY)%>%summarise(count=n())
+
+kable(a,caption = 'Table 6: Race and ethnicity matchup')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+df3[(df3$RACE=='Asian' & df3$ETHNICITY==''),]$ETHNICITY='Not Hispanic or Latino'
+df3[(df3$RACE=='Black or African American' & df3$ETHNICITY==''),]$ETHNICITY='Not Hispanic or Latino'
+df3[(df3$RACE=='White' & df3$ETHNICITY==''),]$ETHNICITY='Not Hispanic or Latino'
+df3[(df3$RACE=='Unknown' & df3$ETHNICITY==''),]$ETHNICITY='Unknown'
+df3[(df3$RACE=='Native Hawaiian or Other Pacific Islander' & df3$ETHNICITY==''),]$ETHNICITY='Not Hispanic or Latino'
+df3[(df3$RACE=='American Indian or Alaskan Native' & df3$ETHNICITY==''),]$ETHNICITY='Not Hispanic or Latino'
+```
+<br>
+
+### View financial_class feature
+```{r,warning=FALSE}
+df3%>%group_by(FINANCIAL_CLASS)%>%summarise(count=n())%>%
+  ggplot()+geom_col(aes(x=reorder(FINANCIAL_CLASS,-count),y = count),fill='blue',color='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 23: Number of observations for each financial class')
+```
+<br>
+
+### View dc_result feature
+```{r,warning=FALSE,fig.width=6, fig.height=10}
+df3%>%group_by(DC_RESULT)%>%summarise(count=n())%>%
+  ggplot()+geom_col(aes(x=reorder(DC_RESULT,-count),y = count),fill='blue',color='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 24: Number of observations for each factor in dc_result feature')
+```
+<br>
+
+### View diagnosis feature
+```{r,warning=FALSE}
+df3%>%group_by(DIAGNOSIS)%>%summarise(count=n())%>%
+  ggplot()+geom_col(aes(x=reorder(DIAGNOSIS,-count),y = count),fill='blue',color='blue')+
+  ylab('Number of Observations')+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 25: Number of observations for each factor in diagnosis')
+```
+<br>
+
+
+## Split data back into train and test set
+```{r,warning=FALSE}
+dtrain=df3[1:38221,]
+dtrain=data.frame(cbind(dtrain,df[,27]))
+colnames(dtrain)[27]='RETURN'
+dtest=df3[38222:50253,]
+```
+<br>
+
+
+
+### Fix issues related to missing entries, and data type
+```{r,warning=FALSE}
+
+dtrain$INDEX=NULL
+dtrain$CONSULT_IN_ED[is.na(dtrain$CONSULT_IN_ED)]=0
+dtrain$CONSULT_IN_ED=as.factor(dtrain$CONSULT_IN_ED)
+
+dtrain$RISK=as.character(dtrain$RISK)
+dtrain$RISK[dtrain$RISK=='']='Not Measured'
+dtrain$RISK=as.factor(dtrain$RISK)
+
+
+dtrain$SEVERITY=as.character(dtrain$SEVERITY)
+dtrain$SEVERITY[dtrain$SEVERITY=='']='Not Measured'
+dtrain$SEVERITY=as.factor(dtrain$SEVERITY)
+
+
+dtrain$ADMIT_RESULT=as.character(dtrain$ADMIT_RESULT)
+dtrain$ADMIT_RESULT[dtrain$ADMIT_RESULT=='']='Others'
+dtrain$ADMIT_RESULT=as.factor(dtrain$ADMIT_RESULT)
+
+dtrain$ACUITY_ARR=as.character(dtrain$ACUITY_ARR)
+dtrain=dtrain[!(dtrain$ACUITY_ARR=='5 Purple'),]
+dtrain$ACUITY_ARR=as.factor(dtrain$ACUITY_ARR)
+
+
+dtrain$SAME_DAY=as.factor(dtrain$SAME_DAY)
+dtrain$CONSULT_ORDER=as.factor(dtrain$CONSULT_ORDER)
+dtrain$CONSULT_CHARGE=as.factor(dtrain$CONSULT_CHARGE)
+
+
+#dtrain$WEEKDAY_ARR=ifelse((dtrain$WEEKDAY_ARR==1 | dtrain$WEEKDAY_ARR==7),'Weekend','Weekday')
+dtrain$WEEKDAY_ARR=as.factor(dtrain$WEEKDAY_ARR)
+dtrain$WEEKDAY_DEP=NULL
+
+
+#for (i in 1:nrow(dtrain)) {
+#  if(dtrain$MONTH_ARR[i]=='12'|dtrain$MONTH_ARR[i]=='1' |dtrain$MONTH_ARR[i]=='2'){
+#    dtrain$MONTH_ARR[i]='Winter'
+#  }
+#  else if(dtrain$MONTH_ARR[i]=='3' |dtrain$MONTH_ARR[i]=='4' |dtrain$MONTH_ARR[i]=='5') {
+#    dtrain$MONTH_ARR[i]='Spring'
+#  }
+#  else if(dtrain$MONTH_ARR[i]=='6' |dtrain$MONTH_ARR[i]=='7' |dtrain$MONTH_ARR[i]=='8'){
+#    dtrain$MONTH_ARR[i]='Summer'
+#  }
+#  else{
+#    dtrain$MONTH_ARR[i]='Autumn'
+#  }
+#}
+dtrain$MONTH_ARR=as.factor(dtrain$MONTH_ARR)
+
+
+#for (i in 1:nrow(dtrain)) {
+#  if(dtrain$MONTH_DEP[i]=='12'|dtrain$MONTH_DEP[i]=='1' |dtrain$MONTH_DEP[i]=='2'){
+#    dtrain$MONTH_DEP[i]='Winter'
+#  }
+#  else if(dtrain$MONTH_DEP[i]=='3' |dtrain$MONTH_DEP[i]=='4' |dtrain$MONTH_DEP[i]=='5') {
+#    dtrain$MONTH_DEP[i]='Spring'
+#  }
+#  else if(dtrain$MONTH_DEP[i]=='6' |dtrain$MONTH_DEP[i]=='7' |dtrain$MONTH_DEP[i]=='8'){
+#    dtrain$MONTH_DEP[i]='Summer'
+#  }
+#  else{
+#    dtrain$MONTH_DEP[i]='Autumn'
+#  }
+#}
+dtrain$MONTH_DEP=as.factor(dtrain$MONTH_DEP)
+
+
+
+#dtrain$HOUR_ARR=ifelse((dtrain$HOUR_ARR<18 | dtrain$HOUR_ARR<8),'Daytime','Evening')
+#dtrain$HOUR_DEP=ifelse((dtrain$HOUR_DEP<18 | dtrain$HOUR_DEP<8),'Daytime','Evening')
+dtrain$HOUR_DEP=NULL
+
+dtrain$CHARGES=as.numeric(as.character(dtrain$CHARGES))
+#dtrain$CHARGES[is.na(dtrain$CHARGES) & dtrain$ED_RESULT=='Arrived in Error']=0
+#dtrain$CHARGES[is.na(dtrain$CHARGES)]=median(dtrain$CHARGES,na.rm = TRUE)
+
+dtrain$ED_RESULT=as.character(dtrain$ED_RESULT)
+#dtrain$ED_RESULT[dtrain$ED_RESULT=='']='Discharge'
+dtrain$ED_RESULT=as.factor(dtrain$ED_RESULT)
+
+#dtrain=dtrain[!(dtrain$GENDER==''),]
+
+
+#dtrain$RACE[dtrain$RACE=='']='Black or African American'
+#dtrain$RACE[dtrain$RACE=='']='Black or African American'
+#dtrain$ETHNICITY[dtrain$ETHNICITY=='']='Not Hispanic or Latino'
+
+dtrain$DC_RESULT=as.character(dtrain$DC_RESULT)
+#dtrain$DC_RESULT[dtrain$DC_RESULT=='']='Home or Self Care'
+#dtrain$DC_RESULT=ifelse(dtrain$DC_RESULT=='Home or Self Care','Home or Self Care','Others')
+dtrain$DC_RESULT=as.factor(dtrain$DC_RESULT)
+
+
+dtrain[dtrain=='']=NA
+dtrain[dtrain=='#N/A']=NA
+dtrain[dtrain=='#VALUE!']=NA
+dtrain=na.omit(dtrain)
+dtrain=droplevels(dtrain)
+```
+<br>
+
+
+
+## Exploratory analysis of training dataset
+<br>
+
+### View by hospitals and returns
+```{r,warning=FALSE}
+dtrain%>%group_by(HOSPITAL,RETURN)%>%summarise(count=n())%>%mutate(Percent=count/sum(count))%>%
+  ggplot()+geom_col(aes(x=HOSPITAL,y=Percent,fill=RETURN))+
+  ggtitle('Figure 26: Return vs hospital')
+```
+<br>
+
+### View by gender and returns
+```{r,warning=FALSE}
+dtrain%>%group_by(GENDER,RETURN)%>%summarise(count=n())%>%group_by(GENDER)%>%mutate(Percent=count/sum(count))%>%
+  ggplot()+geom_col(aes(x=GENDER,y=Percent,fill=RETURN))+
+  ggtitle('Figure 27: Return vs gender')
+```
+<br>
+
+### View by age and returns
+```{r,warning=FALSE}
+dtrain%>%ggplot()+geom_boxplot(aes(x = RETURN,y = AGE))+ylab('Density of Observations')+
+  ggtitle('Figure 28: Return vs age')
+```
+<br>
+
+### View by race and return
+```{r,warning=FALSE}
+dtrain%>%group_by(RACE,RETURN)%>%summarise(count=n())%>%
+  group_by(RACE)%>%mutate(Percent=count/sum(count))%>%
+  ggplot()+geom_col(aes(x=RACE,y=Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 29: Return vs race')
+```
+<br>
+
+### View by ethnicity and return
+```{r,warning=FALSE}
+dtrain%>%group_by(ETHNICITY,RETURN)%>%summarise(count=n())%>%
+  group_by(ETHNICITY)%>%mutate(Percent=count/sum(count))%>%
+  ggplot()+geom_col(aes(x = ETHNICITY,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 30: Return vs ethnicity')
+```
+<br>
+
+### View by financial class and return
+```{r,warning=FALSE}
+dtrain%>%group_by(FINANCIAL_CLASS,RETURN)%>%summarise(count=n())%>%
+  group_by(FINANCIAL_CLASS)%>%mutate(Percent=count/sum(count))%>%
+  ggplot()+geom_col(aes(x = FINANCIAL_CLASS,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 31: Return vs hospital')
+```
+<br>
+
+### View by weekday arrival and return
+```{r,warning=FALSE}
+dtrain%>%group_by(WEEKDAY_ARR,RETURN)%>%summarise(count=n())%>%group_by(WEEKDAY_ARR)%>%
+  mutate(Percent=count/sum(count))%>%
+  ggplot()+geom_col(aes(x = WEEKDAY_ARR,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 32: Return vs weekday arrival')
+```
+<br>
+
+### View by hour arrival and return
+```{r,warning=FALSE}
+dtrain%>%ggplot()+geom_boxplot(aes(x=RETURN,y = HOUR_ARR))+xlab('Returning Customers')+
+  ggtitle('Figure 33: Return vs hour arrival')
+```
+<br>
+
+### View by month arrival and return
+```{r,warning=FALSE}
+dtrain%>%group_by(MONTH_ARR,RETURN)%>%summarise(count=n())%>%group_by(MONTH_ARR)%>%mutate(Percent=count/sum(count))%>%
+  ggplot()+geom_col(aes(x = MONTH_ARR,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 34: Return vs month arrival')
+```
+<br>
+
+
+### View by month departure and return
+```{r,warning=FALSE}
+dtrain%>%group_by(MONTH_DEP,RETURN)%>%summarise(count=n())%>%group_by(MONTH_DEP)%>%
+  mutate(Percent=count/sum(count))%>%ggplot()+
+  geom_col(aes(x = MONTH_DEP,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 37: Return vs month departure')
+```
+<br>
+
+### View by same day and return
+```{r,warning=FALSE}
+dtrain%>%group_by(SAME_DAY,RETURN)%>%summarise(count=n())%>%group_by(SAME_DAY)%>%
+  mutate(Percent=count/sum(count))%>%ggplot()+
+  geom_col(aes(x = SAME_DAY,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 38: Return vs same day')
+```
+<br>
+
+### View by ed_result and return
+```{r,warning=FALSE}
+dtrain%>%group_by(ED_RESULT,RETURN)%>%summarise(count=n())%>%group_by(ED_RESULT)%>%
+  mutate(Percent=count/sum(count))%>%ggplot()+
+  geom_col(aes(x = ED_RESULT,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 39: Return vs ed_result')
+```
+<br>
+
+### View by acuity of arrival and return
+```{r,warning=FALSE}
+dtrain%>%group_by(ACUITY_ARR,RETURN)%>%summarise(count=n())%>%group_by(ACUITY_ARR)%>%mutate(Percent=count/sum(count))%>%
+  ggplot+geom_col(aes(x=ACUITY_ARR,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 40: Return vs acuity_arr')
+```
+<br>
+
+### View by dc_result and return
+```{r,warning=FALSE}
+dtrain%>%group_by(DC_RESULT,RETURN)%>%summarise(count=n())%>%
+  group_by(DC_RESULT)%>%mutate(Percent=count/sum(count))%>%
+  ggplot()+geom_col(aes(x = DC_RESULT,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 41: Return vs dc_result')
+```
+<br>
+
+### View by admit_result and return
+```{r,warning=FALSE}
+dtrain%>%group_by(ADMIT_RESULT,RETURN)%>%summarise(count=n())%>%
+  group_by(ADMIT_RESULT)%>%mutate(Percent=count/sum(count))%>%
+  ggplot()+geom_col(aes(x = ADMIT_RESULT,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 42: Return vs admit_result')
+```
+<br>
+
+### View by consult_order and return
+```{r,warning=FALSE}
+dtrain%>%group_by(CONSULT_ORDER,RETURN)%>%summarise(count=n())%>%group_by(CONSULT_ORDER)%>%
+  mutate(Percent=count/sum(count))%>%ggplot()+
+  geom_col(aes(x = CONSULT_ORDER,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 43: Return vs consult_order')
+```
+<br>
+
+### View by consult_charge and return
+```{r,warning=FALSE}
+dtrain%>%group_by(CONSULT_CHARGE,RETURN)%>%summarise(count=n())%>%group_by(CONSULT_CHARGE)%>%
+  mutate(Percent=count/sum(count))%>%ggplot()+
+  geom_col(aes(x = CONSULT_CHARGE,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 44: Return vs consult_charge')
+```
+<br>
+
+### View by consult_in_ed and return
+```{r,warning=FALSE}
+dtrain%>%group_by(CONSULT_IN_ED,RETURN)%>%summarise(count=n())%>%group_by(CONSULT_IN_ED)%>%
+  mutate(Percent=count/sum(count))%>%ggplot()+
+  geom_col(aes(x = CONSULT_IN_ED,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 45: Return vs consult_in_ed')
+```
+<br>
+
+### View by diagnosis and return
+```{r,warning=FALSE}
+dtrain%>%group_by(DIAGNOSIS,RETURN)%>%summarise(count=n())%>%group_by(DIAGNOSIS)%>%mutate(Percent=count/sum(count))%>%
+  ggplot()+geom_col(aes(x = DIAGNOSIS,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 46: Return vs diagnosis')
+```
+<br>
+
+### View by diag_details and return
+```{r,warning=FALSE}
+dtrain%>%group_by(DIAG_DETAILS,RETURN)%>%summarise(count=n())%>%group_by(DIAG_DETAILS)%>%
+  mutate(Percent=count/sum(count))%>%ggplot()+geom_col(aes(x = DIAG_DETAILS,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 44: Return vs diag_details')
+```
+<br>
+
+### View by risk and return
+```{r,warning=FALSE}
+dtrain%>%group_by(RISK,RETURN)%>%summarise(count=n())%>%group_by(RISK)%>%mutate(Percent=count/sum(count))%>%
+  ggplot()+geom_col(aes(x = RISK,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 47: Return vs risk')
+```
+<br>
+
+### View by severity and return
+```{r,warning=FALSE}
+dtrain%>%group_by(SEVERITY,RETURN)%>%summarise(count=n())%>%group_by(SEVERITY)%>%mutate(Percent=count/sum(count))%>%
+  ggplot()+geom_col(aes(x = SEVERITY,y = Percent,fill=RETURN))+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle('Figure 48: Return vs severity')
+```
+<br>
+
+### View by CHARGES
+```{r,warning=FALSE}
+dtrain%>%ggplot()+geom_boxplot(aes(x=RETURN,y = CHARGES))+xlab('Returning Customers')+
+  ggtitle('Figure 49: Return vs charges')
+```
+
+
+## Inferential Model
+<br>
+
+### Logsitic regression on full training dataset
+```{r,warning=FALSE}
+model.lm=glm(RETURN~.,data = dtrain,family = 'binomial')
+summary(model.lm)
+```
+<br>
+
+### Stepwise Logsitic regression on full training dataset
+```{r,warning=FALSE}
+model_all=glm(RETURN~.,data = dtrain,family = 'binomial')
+model_null=glm(RETURN~1,data = dtrain,family = 'binomial')
+a=step(object = model_null,scope = list(upper=model_all),direction = 'both',trace = 0)
+summary(a)
+```
+<br>
+
+## Predictive Model
+<br>
+
+### Split dtrain dataset into train and test set 
+```{r,warning=FALSE}
+set.seed(1234)
+
+dtrain$DC_RESULT=ifelse(dtrain$DC_RESULT=='Home or Self Care','Home or Self Care','Others')
+dtrain$DC_RESULT=as.factor(dtrain$DC_RESULT)
+
+index=sample.split(dtrain$RETURN,SplitRatio = 0.75)
+dtrain_train=dtrain[index,]
+dtrain_test=dtrain[!index,]
+
+set.seed(4567)
+index2=sample.split(dtrain_train$RETURN,SplitRatio = 0.75)
+dtrain_valid=dtrain_train[!index2,]
+dtrain_train2=dtrain_train[index2,]
+```
+<br>
+
+
+### Baseline Accuracy
+```{r,warning=FALSE}
+a=table(dtrain_test$RETURN)
+
+kable(a,caption = 'Table 7: Matrix for Baseline Model')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))%>%
+  add_header_above(c(" ", "Actual Values" = 1))
+
+acc_b=max(a)/sum(a)
+print(paste('The accuracy of the baseline model at 0.5 cutoff is:',acc_b))
+```
+<br>
+
+### Logistic regression all variables
+```{r,warning=FALSE}
+model.lm=glm(RETURN~.,data = dtrain_train,family = 'binomial')
+pred=predict(model.lm,dtrain_test,type = 'response')
+pred=ifelse(pred>0.5,'Yes','No')
+cm=table(dtrain_test$RETURN,pred,dnn = c('Actual','Predicted'))
+
+kable(cm,caption = 'Table 9: Confusion Matrix for logistic regression -stepwise')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))%>%
+  add_header_above(c(" ", "Predicted Values" = 2))
+
+acc_lm=(cm[1,1]+cm[2,2])/sum(cm)
+print(paste('The accuracy of the model at 0.5 cutoff is:',acc_lm))
+```
+<br>
+
+### Logistic regression (Stepwise)
+```{r,warning=FALSE}
+model_all=glm(RETURN~.,data = dtrain_train,family = 'binomial')
+model_null=glm(RETURN~1,data = dtrain_train,family = 'binomial')
+a=step(object = model_null,scope = list(upper=model_all),direction = 'both',trace = 0)
+pred=predict(a,dtrain_test,type = 'response')
+pred=ifelse(pred>0.5,'Yes','No')
+cm=table(dtrain_test$RETURN,pred,dnn = c('Actual','Predicted'))
+
+kable(cm,caption = 'Table 9: Confusion Matrix for logistic regression -stepwise')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))%>%
+  add_header_above(c(" ", "Predicted Values" = 2))
+
+acc_lm=(cm[1,1]+cm[2,2])/sum(cm)
+print(paste('The accuracy of the model at 0.5 cutoff is:',acc_lm))
+```
+<br>
+
+
+
+
+### Classification Tree
+```{r,warning=FALSE}
+model_tree=tree(RETURN~.,data = dtrain_train)
+pred=predict(model_tree,newdata = dtrain_test)
+pred=ifelse(pred[,1]>0,1,0)
+
+cm=table(pred,dtrain_test$RETURN)
+
+kable(cm,caption = 'Table 12: Confusion Matrix for classification tree')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))%>%
+  add_header_above(c(" ", "Predicted Values" = 1))
+
+acc_ct=(cm[1,1])/sum(cm)
+print(paste('The accuracy of the model at 0.5 cutoff is:',acc_ct))
+```
+<br>
+
+### Split dtrain dataset into train and test set 
+```{r,warning=FALSE}
+set.seed(1234)
+
+dtrain$DC_RESULT=ifelse(dtrain$DC_RESULT=='Home or Self Care','Home or Self Care','Others')
+dtrain$DC_RESULT=as.factor(dtrain$DC_RESULT)
+
+dtrain2=model.matrix(~.-1,data = dtrain)%>%data.frame()
+index=sample.split(dtrain2$RETURNYes,SplitRatio = 0.75)
+dtrain_train=dtrain2[index,]
+dtrain_test=dtrain2[!index,]
+
+set.seed(4567)
+index2=sample.split(dtrain_train$RETURNYes,SplitRatio = 0.75)
+dtrain_valid=dtrain_train[!index2,]
+dtrain_train2=dtrain_train[index2,]
+```
+<br>
+
+
+### LDA
+```{r,warning=FALSE}
+model_lda=lda(RETURNYes~.,data = dtrain_train)
+pred=predict(model_lda,newdata = dtrain_test)
+
+cm=table(pred$class,dtrain_test$RETURNYes)
+
+kable(cm,caption = 'Table 13: Confusion Matrix for linear discriminant analysis')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))%>%
+  add_header_above(c(" ", "Predicted Values" = 2))
+
+acc_lda=(cm[1,1])/sum(cm)
+print(paste('The accuracy of the model at 0.5 cutoff is:',acc_lda))
+```
+<br>
+
+
+### XGboost - For phase II
+```{r,warning=FALSE}
+l=ncol(dtrain_train)
+X_train<-as.matrix(dtrain_train[,1:(l-1)])
+Y_train<-dtrain_train[,l]
+train_matrix<-xgb.DMatrix(data=X_train, label=Y_train)
+xgb_params <- list(booster="gbtree",
+                   objective = "binary:logistic",
+                   eval_metric = "auc",
+                   eta=0.1,
+                   subsample=1,
+                   max_depth=100,
+                   alpha=1,
+                   lambda=1,
+                   gamma=1,
+                   min_child_weight=20,
+                   max_delta_step = 20,
+                   colsample_bytree=1)
+
+bst<-xgboost(params = xgb_params,data=X_train,label =Y_train,nrounds = 33,verbose = FALSE)
+X_test<-as.matrix(dtrain_test[,1:(l-1)])
+X_test_matrix<-xgb.DMatrix(data=X_test)
+dtrain_test_pred<-predict(bst,X_test_matrix)
+test_pred=ifelse(dtrain_test_pred>0.5,'Yes','No')
+cm_xgb=table(dtrain_test$RETURNYes,test_pred,dnn = c('Actual','Predicted'))
+kable(cm_xgb,caption = 'Table 10: Confusion Matrix for Extreme Gradient Boosting Model')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))%>%
+  add_header_above(c(" ", "Predicted Values" = 2))
+acc_xgb=(cm_xgb[1,1]+cm_xgb[2,2])/sum(cm_xgb)
+print(paste('The accuracy of the model at 0.5 cutoff is:',acc_xgb))
+```
+<br>
+
+### Random Forest - For Phase II
+```{r,warning=FALSE}
+dtrain_train$RETURNYes=as.factor(dtrain_train$RETURNYes)
+model.rf=ranger(RETURNYes~.,data = dtrain_train,
+                mtry = 49,
+                num.trees = 500,
+                min.node.size = 30,
+                sample.fraction = 0.65,
+                seed = 123,
+                verbose = FALSE)
+
+a=predict(model.rf,dtrain_test)
+cm_rf=table(dtrain_test$RETURNYes,a$predictions)
+kable(cm_rf,caption = 'Table 11: Confusion Matrix for Random Forests')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))%>%
+  add_header_above(c(" ", "Predicted Values" = 2))
+acc_rf=(cm_rf[1,1]+cm_rf[2,2])/sum(cm_rf)
+print(paste('The accuracy of the model at 0.5 cutoff is:',acc_rf))
+```
+<br>
+
+### QDA
+```{r,warning=FALSE}
+set.seed(1234)
+
+dtrain2=dtrain
+
+dtrain2$ED_RESULT=as.character(dtrain2$ED_RESULT)
+dtrain2$ED_RESULT=ifelse(dtrain2$ED_RESULT=='Discharge','Discharge',
+                        (ifelse(dtrain2$ED_RESULT=='Admit','Admit','Others')))
+dtrain2$ED_RESULT=as.factor(dtrain2$ED_RESULT)
+
+dtrain2$RACE=as.character(dtrain2$RACE)
+dtrain2$RACE=ifelse(dtrain2$RACE=='Black or African American','Black or African American',
+                    ifelse(dtrain2$RACE=='White','White','Others'))
+dtrain2$RACE=as.factor(dtrain2$RACE)
+ 
+
+dtrain2$SEVERITY=NULL
+
+index=sample.split(dtrain2$RETURN,SplitRatio = 0.75)
+dtrain_train=dtrain2[index,]
+dtrain_test=dtrain2[!index,]
+
+set.seed(4567)
+index2=sample.split(dtrain_train$RETURN,SplitRatio = 0.75)
+dtrain_valid=dtrain_train[!index2,]
+dtrain_train2=dtrain_train[index2,]
+
+
+
+model_lda=qda(RETURN~.,data = dtrain_train)
+pred=predict(model_lda,newdata = dtrain_test)
+
+cm=table(pred$class,dtrain_test$RETURN)
+
+kable(cm,caption = 'Table 14: Confusion matrix for quadratic discriminant analysis')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))%>%
+  add_header_above(c(" ", "Predicted Values" = 2))
+
+acc_qda=(cm[1,1]+cm[2,2])/sum(cm)
+print(paste('The accuracy of the model at 0.5 cutoff is:',acc_qda))
+```
+<br>
+
+
+### KNN
+```{r,warning=FALSE}
+set.seed(1234)
+
+df_knn=dtrain[,c(3,8,20,23,24)]
+df_knn$RETURN=as.character(df_knn$RETURN)
+df_knn$RETURN=ifelse(df_knn$RETURN=='Yes',1,0)
+
+index=sample.split(df_knn$RETURN,SplitRatio = 0.75)
+dtrain_train=df_knn[index,]
+dtrain_test=df_knn[!index,]
+
+set.seed(4567)
+index2=sample.split(dtrain_train$RETURN,SplitRatio = 0.75)
+dtrain_valid=dtrain_train[!index2,]
+dtrain_train2=dtrain_train[index2,]
+
+
+min_max=function(df){
+  new_df=data.frame()
+  col=ncol(df)
+  for (cl in 1:col) {
+    min=min(df[,cl])
+    max=max(df[,cl])
+    for (l in 1:nrow(df)) {
+      new_df[l,cl]=(df[l,cl]-min)/(max-min)
+    }
+  }
+  return(new_df)
+}
+
+
+
+train_X=dtrain_train[,c(1,2,3,4)]
+s_train_X=dtrain_train2[,c(1,2,3,4)]
+valid_X=dtrain_valid[,c(1,2,3,4)]
+test_X=dtrain_test[,c(1,2,3,4)]
+
+
+train_X=min_max(train_X)
+s_train_X=min_max(s_train_X)
+valid_X=min_max(valid_X)
+test_X=min_max(test_X)
+
+train_Y=dtrain_train[,c(5)]
+s_train_Y=dtrain_train2[,c(5)]
+valid_Y=dtrain_valid[,c(5)]
+test_Y=dtrain_test[,c(5)]
+
+df_valid=data.frame()
+for (k in seq(30,44,2)) {
+  pred_knn=knn(s_train_X,valid_X,s_train_Y,k = k)
+  a=table(pred_knn,valid_Y)
+  acc=(a[1,1]+a[2,2])/sum(a)
+  df_valid[((k-30)/2+1),1]=k
+  df_valid[((k-30)/2+1),2]=acc
+}
+
+k=df_valid[,1][df_valid[,2]==max(df_valid[,2])]
+
+pred=knn(train_X,test_X,train_Y,k=k)
+cm=table(pred,test_Y)
+
+kable(cm,caption = 'Table 15: Confusion matrix for KNN Model')%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))%>%
+  add_header_above(c(" ", "Predicted Values" = 2))
+
+acc_knn=(cm[1,1]+cm[2,2])/sum(cm)
+print(paste('The accuracy of the model at 0.5 cutoff is:',acc_knn))
+```
+<br>
